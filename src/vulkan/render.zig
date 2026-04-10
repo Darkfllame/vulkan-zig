@@ -1099,7 +1099,6 @@ const Renderer = struct {
 
     fn renderContainer(self: *Self, name: []const u8, container: reg.Container) !void {
         if (container.comment) |comment| {
-            try self.writer.writeByte('\n');
             try self.renderDocComment(comment);
         }
 
@@ -1127,7 +1126,6 @@ const Renderer = struct {
 
         for (container.fields) |field| {
             if (field.comment) |comment| {
-                try self.writer.writeAll("\n");
                 try self.renderDocComment(comment);
             }
 
@@ -1227,7 +1225,6 @@ const Renderer = struct {
                 continue;
 
             if (field.comment) |comment| {
-                try self.writer.writeByte('\n');
                 try self.renderDocComment(comment);
             }
 
@@ -1293,7 +1290,6 @@ const Renderer = struct {
             for (flags_by_bitpos[0..bits.bitwidth], 0..) |maybe_flag, bitpos| {
                 if (maybe_flag) |flag| {
                     if (flag.comment) |comment| {
-                        try self.writer.writeByte('\n');
                         try self.renderDocComment(comment);
                     }
                     const field_name = try extractBitflagFieldName(bitflag_name, flag.name);
@@ -2356,8 +2352,12 @@ const Renderer = struct {
     }
 
     fn renderDocComment(self: *Self, comment: []const u8) !void {
-        // Some comments have multiple lines, but these are usually not
-        // comment attributes which we are mostly intersted in
+        // Need a newline to avoid syntax error due to a doc comment in trailing
+        // position on a line
+        try self.writer.writeByte('\n');
+
+        // Handle multi-line comments
+        // NOTE: in practice, all comments we are interested in are single line
         var lines = std.mem.splitScalar(u8, comment, '\n');
         while (lines.next()) |line| {
             if (line.len == 0) {
