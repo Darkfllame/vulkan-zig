@@ -781,6 +781,10 @@ const Renderer = struct {
             try self.writeIdentifier(name);
             return;
         } else if (mem.startsWith(u8, name, "Vk")) {
+            if (mem.eql(u8, name, "VkBool32")) {
+                try self.writer.writeAll("bool");
+                return;
+            }
             // Type, strip namespace and write, as they are alreay in title case.
             try self.writeIdentifier(name[2..]);
             return;
@@ -832,13 +836,24 @@ const Renderer = struct {
                     }
                 }
 
+                if (param.param_type == .name) {
+                    if (self.decls_by_name.get(param.param_type.name)) |decl| {
+                        if (decl == .handle and decl.handle.is_dispatchable and param.is_optional) {
+                            try self.writer.writeAll("?");
+                        }
+                    }
+                }
                 try self.renderTypeInfo(param.param_type);
             }
 
             try self.writer.writeAll(", ");
         }
         try self.writer.writeAll(") callconv(vulkan_call_conv)");
-        try self.renderTypeInfo(command_ptr.return_type.*);
+        if (command_ptr.return_type.* == .name and mem.eql(u8, command_ptr.return_type.name, "VkBool32")) {
+            try self.writer.writeAll("Bool32");
+        } else {
+            try self.renderTypeInfo(command_ptr.return_type.*);
+        }
     }
 
     fn renderPointer(self: *Self, pointer: reg.Pointer) !void {
@@ -862,7 +877,15 @@ const Renderer = struct {
         if (child_is_void) {
             try self.writer.writeAll("anyopaque");
         } else {
-            try self.renderTypeInfo(pointer.child.*);
+            const is_bool = pointer.child.* == .name and mem.eql(u8, pointer.child.name, "VkBool32");
+            if (size != .one and is_bool) {
+                try self.writer.writeAll("Bool32");
+            } else {
+                if (is_bool) {
+                    try self.writer.writeAll("align(4) ");
+                }
+                try self.renderTypeInfo(pointer.child.*);
+            }
         }
     }
 
@@ -873,7 +896,11 @@ const Renderer = struct {
             .alias => |alias| try self.renderName(alias),
         }
         try self.writer.writeByte(']');
-        try self.renderTypeInfo(array.child.*);
+        if (array.child.* == .name and std.mem.eql(u8, array.child.name, "VkBool32")) {
+            try self.writer.writeAll("Bool32");
+        } else {
+            try self.renderTypeInfo(array.child.*);
+        }
     }
 
     fn renderDecl(self: *Self, decl: reg.Declaration) !void {
@@ -904,9 +931,9 @@ const Renderer = struct {
         const maybe_author = self.id_renderer.getAuthorTag(name);
         const basename = self.id_renderer.stripAuthorTag(name);
         if (std.mem.eql(u8, basename, "VkBool32")) {
-            try self.renderAssign(name);
+            // Keep this for function returns and other funsies (VkBool32 arrays, as only the base element will be aligned correctly)
             try self.writer.writeAll(
-                \\enum(u32) {
+                \\pub const Bool32 = enum(u32) {
                 \\    false,
                 \\    true,
                 \\};
@@ -1139,6 +1166,9 @@ const Renderer = struct {
                 }
             } else {
                 try self.renderTypeInfo(field.field_type);
+                if (field.field_type == .name and mem.eql(u8, field.field_type.name, "VkBool32")) {
+                    try self.writer.writeAll(" align(4)");
+                }
                 if (!container.is_union) {
                     try self.renderContainerDefaultField(name, container, field);
                 }
@@ -1167,19 +1197,23 @@ const Renderer = struct {
             try self.writer.writeAll(" = .");
             try self.writeIdentifierWithCase(.snake, stype["VK_STRUCTURE_TYPE_".len..]);
         } else if (field.field_type == .name and mem.eql(u8, "VkBool32", field.field_type.name) and isFeatureStruct(name, container.extends)) {
-            try self.writer.writeAll(" = .false");
+            try self.writer.writeAll(" = false");
         } else if (field.is_optional) {
             if (field.field_type == .name) {
                 const field_type_name = field.field_type.name;
                 if (self.resolveDeclaration(field_type_name)) |decl_type| {
                     if (decl_type == .handle) {
-                        try self.writer.writeAll(" = .null_handle");
+                        if (decl_type.handle.is_dispatchable) {
+                            try self.writer.writeAll(" = null");
+                        } else {
+                            try self.writer.writeAll(" = .null_handle");
+                        }
                     } else if (decl_type == .bitmask) {
                         try self.writer.writeAll(" = .{}");
                     } else if (decl_type == .typedef and decl_type.typedef == .command_ptr) {
                         try self.writer.writeAll(" = null");
                     } else if (mem.eql(u8, "VkBool32", field.field_type.name)) {
-                        try self.writer.writeAll(" = .false");
+                        try self.writer.writeAll(" = false");
                     } else if ((decl_type == .typedef and builtin_types.has(decl_type.typedef.name)) or
                         (decl_type == .foreign and builtin_types.has(field_type_name)))
                     {
@@ -1217,7 +1251,12 @@ const Renderer = struct {
 
         try self.writer.writeAll("pub const ");
         try self.renderName(name);
-        try self.writer.writeAll(" = enum(c_int) {");
+        // No. The Vulkan API state that their enums must always be
+        // 32 bits. As it would break ABI compatibility, that's why
+        // generated C headers put a <...>_MAX_VALUE field at the end of
+        // enums.
+        // see https://vulkan.lunarg.com/doc/view/1.4.304.1/windows/antora/spec/latest/chapters/fundamentals.html#fundamentals-implicit-validity
+        try self.writer.writeAll(" = enum(i32) {");
 
         for (enumeration.fields) |field| {
             if (field.value == .alias)
@@ -1341,11 +1380,20 @@ const Renderer = struct {
     }
 
     fn renderHandle(self: *Self, name: []const u8, handle: reg.Handle) !void {
-        const backing_type: []const u8 = if (handle.is_dispatchable) "usize" else "u64";
-
-        try self.writer.writeAll("pub const ");
-        try self.renderName(name);
-        try self.writer.print(" = enum({s}) {{null_handle = 0, _}};\n", .{backing_type});
+        if (handle.is_dispatchable) {
+            try self.writer.writeAll("pub const opaque_");
+            try self.renderName(name);
+            try self.writer.writeAll(" = opaque {};\n");
+            try self.writer.writeAll("pub const ");
+            try self.renderName(name);
+            try self.writer.writeAll(" = *opaque_");
+            try self.renderName(name);
+            try self.writer.writeAll(";\n");
+        } else {
+            try self.writer.writeAll("pub const ");
+            try self.renderName(name);
+            try self.writer.writeAll(" = enum(u64) {null_handle = 0, _};\n");
+        }
     }
 
     fn renderAlias(self: *Self, name: []const u8, alias: reg.Alias) !void {
@@ -1559,7 +1607,7 @@ const Renderer = struct {
         };
 
         const loader_first_arg = switch (dispatch_type) {
-            .base => "Instance.null_handle",
+            .base => "null",
             .instance => "instance",
             .device => "device",
         };
@@ -1567,14 +1615,13 @@ const Renderer = struct {
         @setEvalBranchQuota(2000);
 
         try self.writer.print(
-            \\pub fn load({[params]s}) Self {{
-            \\    var self: Self = .{{ .dispatch = .{{}} }};
+            \\pub fn load(self: *Self, {[params]s}) void {{
+            \\    self.dispatch = .{{}};
             \\    inline for (std.meta.fields(Dispatch)) |field| {{
             \\        if (loader({[first_arg]s}, field.name.ptr)) |cmd_ptr| {{
             \\            @field(self.dispatch, field.name) = @ptrCast(cmd_ptr);
             \\        }}
             \\    }}
-            \\    return self;
             \\}}
         , .{ .params = params, .first_arg = loader_first_arg });
     }
@@ -1601,13 +1648,13 @@ const Renderer = struct {
             \\        const Self = @This();
             \\        pub const Wrapper = {1s}WrapperWithCustomDispatch(DispatchType);
             \\
-            \\        handle: {0s},
+            \\        handle: *{0s},
             // Note: This is a pointer because in the past there were some performance
             // issues with putting an object and vtable in the same structure. This also
             // affected std.mem.Allocator, which is why its like that too.
             \\    wrapper: *const Wrapper,
             \\
-            \\    pub fn init(handle: {0s}, wrapper: *const Wrapper) Self {{
+            \\    pub fn init(handle: *{0s}, wrapper: *const Wrapper) Self {{
             \\        return .{{
             \\            .handle = handle,
             \\            .wrapper = wrapper,
@@ -2009,6 +2056,9 @@ const Renderer = struct {
             try self.writeIdentifierWithCase(.snake, return_var_name);
             try self.writer.writeAll(": ");
             try self.renderTypeInfo(returns[0].return_value_type);
+            if (returns[0].return_value_type == .name and mem.eql(u8, returns[0].return_value_type.name, "VkBool32")) {
+                try self.writer.writeAll(" align(4)");
+            }
             try self.writer.writeAll(" = undefined;\n");
         } else if (returns.len > 1) {
             try self.writer.writeAll("var return_values: ");
@@ -2263,7 +2313,11 @@ const Renderer = struct {
         if (ptr.is_optional) try self.writer.writeByte('?');
         try self.writer.writeAll("[]");
         if (ptr.is_const) try self.writer.writeAll("const ");
-        try self.renderTypeInfo(ptr.child.*);
+        if (ptr.child.* == .name and mem.eql(u8, ptr.child.name, "VkBool32")) {
+            try self.writer.writeAll("Bool32");
+        } else {
+            try self.renderTypeInfo(ptr.child.*);
+        }
         try self.writer.writeByte(',');
     }
 
