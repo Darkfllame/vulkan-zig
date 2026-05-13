@@ -1648,13 +1648,13 @@ const Renderer = struct {
             \\        const Self = @This();
             \\        pub const Wrapper = {1s}WrapperWithCustomDispatch(DispatchType);
             \\
-            \\        handle: *{0s},
+            \\        handle: {0s},
             // Note: This is a pointer because in the past there were some performance
             // issues with putting an object and vtable in the same structure. This also
             // affected std.mem.Allocator, which is why its like that too.
             \\    wrapper: *const Wrapper,
             \\
-            \\    pub fn init(handle: *{0s}, wrapper: *const Wrapper) Self {{
+            \\    pub fn init(handle: {0s}, wrapper: *const Wrapper) Self {{
             \\        return .{{
             \\            .handle = handle,
             \\            .wrapper = wrapper,
