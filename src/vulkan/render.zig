@@ -1861,7 +1861,7 @@ const Renderer = struct {
         try self.renderWrapperName(name, dispatch_handle, kind);
         try self.writer.writeAll("(self: ");
         if (kind == .wrapper) {
-            try self.writer.writeByte('*');
+            try self.writer.writeAll("*const ");
         }
         try self.writer.writeAll("Self, ");
 
