@@ -781,10 +781,6 @@ const Renderer = struct {
             try self.writeIdentifier(name);
             return;
         } else if (mem.startsWith(u8, name, "Vk")) {
-            if (mem.eql(u8, name, "VkBool32")) {
-                try self.writer.writeAll("bool");
-                return;
-            }
             // Type, strip namespace and write, as they are alreay in title case.
             try self.writeIdentifier(name[2..]);
             return;
@@ -849,11 +845,7 @@ const Renderer = struct {
             try self.writer.writeAll(", ");
         }
         try self.writer.writeAll(") callconv(vulkan_call_conv)");
-        if (command_ptr.return_type.* == .name and mem.eql(u8, command_ptr.return_type.name, "VkBool32")) {
-            try self.writer.writeAll("Bool32");
-        } else {
             try self.renderTypeInfo(command_ptr.return_type.*);
-        }
     }
 
     fn renderPointer(self: *Self, pointer: reg.Pointer) !void {
@@ -877,15 +869,7 @@ const Renderer = struct {
         if (child_is_void) {
             try self.writer.writeAll("anyopaque");
         } else {
-            const is_bool = pointer.child.* == .name and mem.eql(u8, pointer.child.name, "VkBool32");
-            if (size != .one and is_bool) {
-                try self.writer.writeAll("Bool32");
-            } else {
-                if (is_bool) {
-                    try self.writer.writeAll("align(4) ");
-                }
                 try self.renderTypeInfo(pointer.child.*);
-            }
         }
     }
 
@@ -896,11 +880,7 @@ const Renderer = struct {
             .alias => |alias| try self.renderName(alias),
         }
         try self.writer.writeByte(']');
-        if (array.child.* == .name and std.mem.eql(u8, array.child.name, "VkBool32")) {
-            try self.writer.writeAll("Bool32");
-        } else {
             try self.renderTypeInfo(array.child.*);
-        }
     }
 
     fn renderDecl(self: *Self, decl: reg.Declaration) !void {
@@ -931,12 +911,8 @@ const Renderer = struct {
         const maybe_author = self.id_renderer.getAuthorTag(name);
         const basename = self.id_renderer.stripAuthorTag(name);
         if (std.mem.eql(u8, basename, "VkBool32")) {
-            // Keep this for function returns and other funsies (VkBool32 arrays, as only the base element will be aligned correctly)
             try self.writer.writeAll(
-                \\pub const Bool32 = enum(u32) {
-                \\    false,
-                \\    true,
-                \\};
+                \\pub const Bool32 = enum(u32) { false, true };
                 \\
             );
         } else if (std.mem.eql(u8, basename, "VkAccelerationStructureInstance")) {
@@ -1166,9 +1142,6 @@ const Renderer = struct {
                 }
             } else {
                 try self.renderTypeInfo(field.field_type);
-                if (field.field_type == .name and mem.eql(u8, field.field_type.name, "VkBool32")) {
-                    try self.writer.writeAll(" align(4)");
-                }
                 if (!container.is_union) {
                     try self.renderContainerDefaultField(name, container, field);
                 }
@@ -1197,7 +1170,7 @@ const Renderer = struct {
             try self.writer.writeAll(" = .");
             try self.writeIdentifierWithCase(.snake, stype["VK_STRUCTURE_TYPE_".len..]);
         } else if (field.field_type == .name and mem.eql(u8, "VkBool32", field.field_type.name) and isFeatureStruct(name, container.extends)) {
-            try self.writer.writeAll(" = false");
+            try self.writer.writeAll(" = .false");
         } else if (field.is_optional) {
             if (field.field_type == .name) {
                 const field_type_name = field.field_type.name;
@@ -1213,7 +1186,7 @@ const Renderer = struct {
                     } else if (decl_type == .typedef and decl_type.typedef == .command_ptr) {
                         try self.writer.writeAll(" = null");
                     } else if (mem.eql(u8, "VkBool32", field.field_type.name)) {
-                        try self.writer.writeAll(" = false");
+                        try self.writer.writeAll(" = .false");
                     } else if ((decl_type == .typedef and builtin_types.has(decl_type.typedef.name)) or
                         (decl_type == .foreign and builtin_types.has(field_type_name)))
                     {
@@ -2060,9 +2033,6 @@ const Renderer = struct {
             try self.writeIdentifierWithCase(.snake, return_var_name);
             try self.writer.writeAll(": ");
             try self.renderTypeInfo(returns[0].return_value_type);
-            if (returns[0].return_value_type == .name and mem.eql(u8, returns[0].return_value_type.name, "VkBool32")) {
-                try self.writer.writeAll(" align(4)");
-            }
             try self.writer.writeAll(" = undefined;\n");
         } else if (returns.len > 1) {
             try self.writer.writeAll("var return_values: ");
@@ -2321,11 +2291,7 @@ const Renderer = struct {
         if (ptr.is_optional) try self.writer.writeByte('?');
         try self.writer.writeAll("[]");
         if (ptr.is_const) try self.writer.writeAll("const ");
-        if (ptr.child.* == .name and mem.eql(u8, ptr.child.name, "VkBool32")) {
-            try self.writer.writeAll("Bool32");
-        } else {
             try self.renderTypeInfo(ptr.child.*);
-        }
         try self.writer.writeByte(',');
     }
 
