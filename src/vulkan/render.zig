@@ -2107,7 +2107,11 @@ const Renderer = struct {
     ) !void {
         try self.writer.writeAll("pub fn ");
         try self.renderWrapperName(name, dispatch_handle, kind);
-        try self.writer.writeAll("(self: *Self, ");
+        try self.writer.writeAll("(self: ");
+        if (kind == .wrapper) {
+            try self.writer.writeAll("*const ");
+        }
+        try self.writer.writeAll("Self, ");
         for (params) |param| {
             const class = try self.classifyParam(params, param);
             // Skip the dispatch type for proxying wrappers
