@@ -845,7 +845,7 @@ const Renderer = struct {
             try self.writer.writeAll(", ");
         }
         try self.writer.writeAll(") callconv(vulkan_call_conv)");
-            try self.renderTypeInfo(command_ptr.return_type.*);
+        try self.renderTypeInfo(command_ptr.return_type.*);
     }
 
     fn renderPointer(self: *Self, pointer: reg.Pointer) !void {
@@ -869,7 +869,7 @@ const Renderer = struct {
         if (child_is_void) {
             try self.writer.writeAll("anyopaque");
         } else {
-                try self.renderTypeInfo(pointer.child.*);
+            try self.renderTypeInfo(pointer.child.*);
         }
     }
 
@@ -880,7 +880,7 @@ const Renderer = struct {
             .alias => |alias| try self.renderName(alias),
         }
         try self.writer.writeByte(']');
-            try self.renderTypeInfo(array.child.*);
+        try self.renderTypeInfo(array.child.*);
     }
 
     fn renderDecl(self: *Self, decl: reg.Declaration) !void {
@@ -1726,7 +1726,18 @@ const Renderer = struct {
             return error.InvalidRegistry;
         }
         const params = command.params[0 .. command.params.len - 2];
-        const data_type = try getEnumerateFunctionDataType(command);
+        var data_type = try getEnumerateFunctionDataType(command);
+
+        fix_dtype: for (command.params) |param| {
+            if (std.mem.endsWith(u8, param.name, "Count")) {
+                break :fix_dtype;
+            }
+
+            if (std.mem.endsWith(u8, param.name, "Size")) {
+                data_type = .{ .name = "uint8_t" };
+                break :fix_dtype;
+            }
+        } else return error.InvalidRegistry;
 
         if (returns_vk_result) {
             try self.writer.writeAll("pub const ");
@@ -1830,7 +1841,11 @@ const Renderer = struct {
         dispatch_handle: []const u8,
         kind: WrapperKind,
     ) !void {
-        try self.writer.writeAll("pub fn ");
+        try self.writer.writeAll("pub ");
+        if (kind == .proxy) {
+            try self.writer.writeAll("inline ");
+        }
+        try self.writer.writeAll("fn ");
         try self.renderWrapperName(name, dispatch_handle, kind);
         try self.writer.writeAll("(self: ");
         if (kind == .wrapper) {
@@ -2291,7 +2306,7 @@ const Renderer = struct {
         if (ptr.is_optional) try self.writer.writeByte('?');
         try self.writer.writeAll("[]");
         if (ptr.is_const) try self.writer.writeAll("const ");
-            try self.renderTypeInfo(ptr.child.*);
+        try self.renderTypeInfo(ptr.child.*);
         try self.writer.writeByte(',');
     }
 
