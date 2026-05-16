@@ -11,10 +11,10 @@ const reg = @import("registry.zig");
 const preamble =
     \\// This file is generated from the Khronos Vulkan XML API registry by vulkan-zig.
     \\
+    \\const vk = @This();
     \\const std = @import("std");
     \\const builtin = @import("builtin");
     \\const root = @import("root");
-    \\const vk = @This();
     \\const Allocator = std.mem.Allocator;
     \\
     \\pub const vulkan_call_conv: std.builtin.CallingConvention = if (builtin.os.tag == .windows and builtin.cpu.arch == .x86)
@@ -59,8 +59,8 @@ const preamble =
     \\    return struct {
     \\        pub fn format(
     \\            self: FlagsType,
-    \\            writer: anytype,
-    \\        ) !void {
+    \\            writer: *std.Io.Writer,
+    \\        ) std.Io.Writer.Error!void {
     \\            try writer.writeAll(@typeName(FlagsType) ++ "{");
     \\            var first = true;
     \\            @setEvalBranchQuota(100_000);
@@ -85,16 +85,22 @@ const preamble =
     \\    minor: u10,
     \\    major: u7,
     \\    variant: u3,
+    \\
+    \\    pub fn of(variant: u3, major: u7, minor: u10, patch: u12) Version {
+    \\        return .{ .variant = variant, .major = major, .minor = minor, .patch = patch };
+    \\    }
+    \\
+    \\    pub fn fromU32(int: u32) Version {
+    \\        return @bitCast(int);
+    \\    }
+    \\
     \\    pub fn toU32(ver: Version) u32 {
     \\        return @bitCast(ver);
     \\    }
     \\};
-    \\pub fn makeApiVersion(variant: u3, major: u7, minor: u10, patch: u12) Version {
-    \\    return .{ .variant = variant, .major = major, .minor = minor, .patch = patch };
-    \\}
     \\pub const ApiInfo = struct {
     \\    name: [:0]const u8 = "custom",
-    \\    version: Version = makeApiVersion(0, 0, 0, 0),
+    \\    version: Version = .of(0, 0, 0, 0),
     \\};
 ;
 
@@ -674,13 +680,13 @@ const Renderer = struct {
         }
 
         try self.writer.writeAll("pub const ");
-        try self.renderName(api_constant.name);
+        try self.renderName(api_constant.name, null);
         try self.writer.writeAll(" = ");
 
         switch (api_constant.value) {
             .expr => |expr| try self.renderApiConstantExpr(expr),
             inline .version, .video_std_version => |version, kind| {
-                try self.writer.writeAll("makeApiVersion(");
+                try self.writer.writeAll("Version.of(");
                 // For Vulkan Video, just re-use the API version and set the variant to 0.
                 if (kind == .video_std_version) {
                     try self.writer.writeAll("0, ");
@@ -716,7 +722,7 @@ const Renderer = struct {
                     continue;
                 },
                 .id => {
-                    try self.renderName(tok.text);
+                    try self.renderName(tok.text, null);
                     continue;
                 },
                 .int => {},
@@ -756,17 +762,23 @@ const Renderer = struct {
         }
     }
 
-    fn renderTypeInfo(self: *Self, type_info: reg.TypeInfo) RenderTypeInfoError!void {
+    fn renderTypeInfo(self: *Self, type_info: reg.TypeInfo, origin_name: ?[]const u8) RenderTypeInfoError!void {
         switch (type_info) {
-            .name => |name| try self.renderName(name),
+            .name => |name| try self.renderName(name, origin_name),
             .command_ptr => |command_ptr| try self.renderCommandPtr(command_ptr, true),
-            .pointer => |pointer| try self.renderPointer(pointer),
-            .array => |array| try self.renderArray(array),
+            .pointer => |pointer| try self.renderPointer(pointer, origin_name),
+            .array => |array| try self.renderArray(array, origin_name),
         }
     }
 
-    fn renderName(self: *Self, name: []const u8) !void {
+    fn renderName(self: *Self, name: []const u8, origin_name: ?[]const u8) !void {
         if (builtin_types.get(name)) |zig_name| {
+            if (origin_name) |oname| {
+                if (mem.endsWith(u8, oname, "Version") and mem.eql(u8, zig_name, "u32")) {
+                    try self.writer.writeAll("Version");
+                    return;
+                }
+            }
             try self.writer.writeAll(zig_name);
             return;
         } else if (try self.extractBitflagName(name)) |bitflag_name| {
@@ -827,7 +839,7 @@ const Renderer = struct {
                         });
                         break :blk;
                     } else if (self.isFlags(param.param_type.name)) {
-                        try self.renderTypeInfo(param.param_type);
+                        try self.renderTypeInfo(param.param_type, param.name);
                         break :blk;
                     }
                 }
@@ -839,16 +851,16 @@ const Renderer = struct {
                         }
                     }
                 }
-                try self.renderTypeInfo(param.param_type);
+                try self.renderTypeInfo(param.param_type, param.name);
             }
 
             try self.writer.writeAll(", ");
         }
         try self.writer.writeAll(") callconv(vulkan_call_conv)");
-        try self.renderTypeInfo(command_ptr.return_type.*);
+        try self.renderTypeInfo(command_ptr.return_type.*, null);
     }
 
-    fn renderPointer(self: *Self, pointer: reg.Pointer) !void {
+    fn renderPointer(self: *Self, pointer: reg.Pointer, origin_name: ?[]const u8) !void {
         const child_is_void = pointer.child.* == .name and mem.eql(u8, pointer.child.name, "void");
 
         if (pointer.is_optional) {
@@ -869,18 +881,21 @@ const Renderer = struct {
         if (child_is_void) {
             try self.writer.writeAll("anyopaque");
         } else {
-            try self.renderTypeInfo(pointer.child.*);
+            try self.renderTypeInfo(pointer.child.*, origin_name);
         }
     }
 
-    fn renderArray(self: *Self, array: reg.Array) !void {
+    fn renderArray(self: *Self, array: reg.Array, origin_name: ?[]const u8) !void {
         try self.writer.writeByte('[');
         switch (array.size) {
             .int => |size| try self.writer.print("{}", .{size}),
-            .alias => |alias| try self.renderName(alias),
+            .alias => |alias| try self.renderName(alias, origin_name),
+        }
+        if (array.valid_size == .zero_terminated) {
+            try self.writer.writeAll(" - 1 : 0");
         }
         try self.writer.writeByte(']');
-        try self.renderTypeInfo(array.child.*);
+        try self.renderTypeInfo(array.child.*, origin_name);
     }
 
     fn renderDecl(self: *Self, decl: reg.Declaration) !void {
@@ -903,7 +918,7 @@ const Renderer = struct {
 
     fn renderAssign(self: *Self, name: []const u8) !void {
         try self.writer.writeAll("pub const ");
-        try self.renderName(name);
+        try self.renderName(name, null);
         try self.writer.writeAll(" = ");
     }
 
@@ -1105,7 +1120,7 @@ const Renderer = struct {
         }
 
         try self.writer.writeAll("pub const ");
-        try self.renderName(name);
+        try self.renderName(name, null);
         try self.writer.writeAll(" = ");
 
         if (try self.renderSimpleBitContainer(container)) {
@@ -1137,11 +1152,11 @@ const Renderer = struct {
                 try self.writer.print(" u{},", .{bits});
                 if (field.field_type != .name or builtin_types.get(field.field_type.name) == null) {
                     try self.writer.writeAll("// ");
-                    try self.renderTypeInfo(field.field_type);
+                    try self.renderTypeInfo(field.field_type, field.name);
                     try self.writer.writeByte('\n');
                 }
             } else {
-                try self.renderTypeInfo(field.field_type);
+                try self.renderTypeInfo(field.field_type, field.name);
                 if (!container.is_union) {
                     try self.renderContainerDefaultField(name, container, field);
                 }
@@ -1223,7 +1238,7 @@ const Renderer = struct {
         }
 
         try self.writer.writeAll("pub const ");
-        try self.renderName(name);
+        try self.renderName(name, null);
         // No. The Vulkan API state that their enums must always be
         // 32 bits. As it would break ABI compatibility, that's why
         // generated C headers put a <...>_MAX_VALUE field at the end of
@@ -1257,7 +1272,7 @@ const Renderer = struct {
             try self.writer.writeAll("pub const ");
             try self.renderEnumFieldName(name, field.name);
             try self.writer.writeAll(" = ");
-            try self.renderName(name);
+            try self.renderName(name, null);
             try self.writer.writeByte('.');
             try self.renderEnumFieldName(name, field.value.alias.name);
             try self.writer.writeAll(";\n");
@@ -1276,7 +1291,7 @@ const Renderer = struct {
 
     fn renderBitmaskBits(self: *Self, name: []const u8, bits: reg.Enum) !void {
         try self.writer.writeAll("pub const ");
-        try self.renderName(name);
+        try self.renderName(name, null);
         const flags_type = try bitmaskFlagsType(bits.bitwidth);
         try self.writer.print(" = packed struct({s}) {{", .{flags_type});
 
@@ -1324,7 +1339,7 @@ const Renderer = struct {
             const flags_type = try bitmaskFlagsType(bitmask.bitwidth);
 
             try self.writer.writeAll("pub const ");
-            try self.renderName(name);
+            try self.renderName(name, null);
             try self.writer.print(
                 \\ = packed struct({s}) {{
                 \\_reserved_bits: {s} = 0,
@@ -1344,27 +1359,27 @@ const Renderer = struct {
         try self.writer.writeAll("\n");
         for (functions) |function| {
             try self.writer.print("pub const {s} = {s}(", .{ function, mixin });
-            try self.renderName(name);
+            try self.renderName(name, null);
             try self.writer.print("{s}).{s};\n", .{ name_suffix orelse "", function });
         }
         try self.writer.writeAll("pub const format = FlagFormatMixin(");
-        try self.renderName(name);
+        try self.renderName(name, null);
         try self.writer.print("{s}).format;\n", .{name_suffix orelse ""});
     }
 
     fn renderHandle(self: *Self, name: []const u8, handle: reg.Handle) !void {
         if (handle.is_dispatchable) {
             try self.writer.writeAll("pub const opaque_");
-            try self.renderName(name);
+            try self.renderName(name, null);
             try self.writer.writeAll(" = opaque {};\n");
             try self.writer.writeAll("pub const ");
-            try self.renderName(name);
+            try self.renderName(name, null);
             try self.writer.writeAll(" = *opaque_");
-            try self.renderName(name);
+            try self.renderName(name, null);
             try self.writer.writeAll(";\n");
         } else {
             try self.writer.writeAll("pub const ");
-            try self.renderName(name);
+            try self.renderName(name, null);
             try self.writer.writeAll(" = enum(u64) {null_handle = 0, _};\n");
         }
     }
@@ -1378,15 +1393,15 @@ const Renderer = struct {
         }
 
         try self.writer.writeAll("pub const ");
-        try self.renderName(name);
+        try self.renderName(name, null);
         try self.writer.writeAll(" = ");
-        try self.renderName(alias.name);
+        try self.renderName(alias.name, null);
         try self.writer.writeAll(";\n");
     }
 
     fn renderExternal(self: *Self, name: []const u8) !void {
         try self.writer.writeAll("pub const ");
-        try self.renderName(name);
+        try self.renderName(name, null);
         try self.writer.writeAll(" = opaque {};\n");
     }
 
@@ -1413,9 +1428,9 @@ const Renderer = struct {
 
     fn renderTypedef(self: *Self, name: []const u8, type_info: reg.TypeInfo) !void {
         try self.writer.writeAll("pub const ");
-        try self.renderName(name);
+        try self.renderName(name, null);
         try self.writer.writeAll(" = ");
-        try self.renderTypeInfo(type_info);
+        try self.renderTypeInfo(type_info, name);
         try self.writer.writeAll(";\n");
     }
 
@@ -1454,7 +1469,7 @@ const Renderer = struct {
             try self.writer.writeAll("pub const ");
             try self.writeIdentifierWithCase(.snake, trimVkNamespace(feature.name));
             try self.writer.writeAll("= ApiInfo {\n");
-            try self.writer.print(".name = \"{s}\", .version = makeApiVersion(0, {}, {}, 0),\n}};\n", .{
+            try self.writer.print(".name = \"{s}\", .version = .of(0, {}, {}, 0),\n}};\n", .{
                 trimVkNamespace(feature.name),
                 feature.level.major,
                 feature.level.minor,
@@ -1481,11 +1496,11 @@ const Renderer = struct {
             try self.writer.writeAll("= ApiInfo {\n");
             try self.writer.print(".name = \"{s}\", .version = ", .{ext.name});
             switch (ext.version) {
-                .int => |version| try self.writer.print("makeApiVersion(0, {}, 0, 0)", .{version}),
+                .int => |version| try self.writer.print(".of(0, {}, 0, 0)", .{version}),
                 // This should be the same as in self.renderApiConstant.
                 // We assume that this is already a vk.Version type.
-                .alias => |alias| try self.renderName(alias),
-                .unknown => try self.writer.writeAll("makeApiVersion(0, 0, 0, 0)"),
+                .alias => |alias| try self.renderName(alias, null),
+                .unknown => try self.writer.writeAll(".of(0, 0, 0, 0)"),
             }
             try self.writer.writeAll(",};\n");
         }
@@ -1829,7 +1844,7 @@ const Renderer = struct {
     fn renderWrapperParam(self: *Self, param: reg.Command.Param) !void {
         try self.renderParamName(param.name);
         try self.writer.writeAll(": ");
-        try self.renderTypeInfo(param.param_type);
+        try self.renderTypeInfo(param.param_type, param.name);
         try self.writer.writeAll(", ");
     }
 
@@ -1882,7 +1897,7 @@ const Renderer = struct {
         }
 
         if (returns.len == 1) {
-            try self.renderTypeInfo(returns[0].return_value_type);
+            try self.renderTypeInfo(returns[0].return_value_type, returns[0].name);
         } else if (returns.len > 1) {
             try self.renderReturnStructName(name);
         } else {
@@ -1988,7 +2003,7 @@ const Renderer = struct {
         for (returns) |ret| {
             try self.renderParamName(ret.name);
             try self.writer.writeAll(": ");
-            try self.renderTypeInfo(ret.return_value_type);
+            try self.renderTypeInfo(ret.return_value_type, ret.name);
             try self.writer.writeAll(", ");
         }
         try self.writer.writeAll("};\n");
@@ -2047,7 +2062,7 @@ const Renderer = struct {
             try self.writer.writeAll("var ");
             try self.writeIdentifierWithCase(.snake, return_var_name);
             try self.writer.writeAll(": ");
-            try self.renderTypeInfo(returns[0].return_value_type);
+            try self.renderTypeInfo(returns[0].return_value_type, returns[0].name);
             try self.writer.writeAll(" = undefined;\n");
         } else if (returns.len > 1) {
             try self.writer.writeAll("var return_values: ");
@@ -2121,7 +2136,7 @@ const Renderer = struct {
         }
 
         try self.writer.writeAll("![]");
-        try self.renderTypeInfo(data_type);
+        try self.renderTypeInfo(data_type, params.ptr[params.len].name); // trust me bro
     }
 
     fn renderWrapperAlloc(self: *Self, wrapped_name: []const u8, command: reg.Command) !void {
@@ -2135,6 +2150,7 @@ const Renderer = struct {
         }
         const params = command.params[0 .. command.params.len - 2];
         var data_type = try getEnumerateFunctionDataType(command);
+        const data_type_name = command.params[command.params.len - 1].name;
 
         if (returns_vk_result) {
             try self.writer.writeAll("pub const ");
@@ -2164,12 +2180,12 @@ const Renderer = struct {
         try self.writer.writeAll("{\n");
         try self.renderSliceLenAsserts(wrapped_name, params);
         try self.writer.writeAll("    var count: ");
-        try self.renderTypeInfo(count_type);
+        try self.renderTypeInfo(count_type, null);
         try self.writer.writeAll(" = undefined;\n");
 
         if (returns_vk_result) {
             try self.writer.writeAll("var data: []");
-            try self.renderTypeInfo(data_type);
+            try self.renderTypeInfo(data_type, data_type_name);
             try self.writer.writeAll(
                 \\ = &.{};
                 \\errdefer allocator.free(data);
@@ -2189,7 +2205,7 @@ const Renderer = struct {
             );
         } else {
             try self.writer.writeAll("const data = try allocator.alloc(");
-            try self.renderTypeInfo(data_type);
+            try self.renderTypeInfo(data_type, data_type_name);
             try self.writer.writeAll(
                 \\, count);
                 \\errdefer allocator.free(data);
@@ -2306,7 +2322,7 @@ const Renderer = struct {
         if (ptr.is_optional) try self.writer.writeByte('?');
         try self.writer.writeAll("[]");
         if (ptr.is_const) try self.writer.writeAll("const ");
-        try self.renderTypeInfo(ptr.child.*);
+        try self.renderTypeInfo(ptr.child.*, param.name);
         try self.writer.writeByte(',');
     }
 
